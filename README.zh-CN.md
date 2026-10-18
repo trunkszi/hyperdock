@@ -15,6 +15,19 @@ HyperDock 是 macOS 菜单栏代理（agent）应用：自身不出现在 Dock �
 
 ---
 
+## 界面截图
+
+所有设置页均提供英语与简体中文两种界面。可在 **设置 → 关于 → 语言** 中切换，切换后立即生效，无需重启。
+
+| | English | 简体中文 |
+|---|---|---|
+| **通用** | ![General](images/settings-general-en.png) | ![通用](images/settings-general-zh.png) |
+| **程序坞项目** —— 修饰键 + 点击快捷操作 | ![Dock Items](images/settings-dock-items-en.png) | ![程序坞项目](images/settings-dock-items-zh.png) |
+| **窗口管理** —— 边缘吸附、键盘吸附、移动 / 缩放 | ![Window Management](images/settings-window-management-en.png) | ![窗口管理](images/settings-window-management-zh.png) |
+| **外观** | ![Appearance](images/settings-appearance-en.png) | ![外观](images/settings-appearance-zh.png) |
+
+---
+
 ## 功能
 
 ### 窗口预览
@@ -190,6 +203,14 @@ defaults delete com.hyperdock.HyperDock 2>/dev/null || true
 ```
 
 若开启过「立即显示隐藏的 Dock」，请先关闭该选项再退出，以便恢复系统 Dock 默认值；也可在 **通用 → 重置所有设置…** 中一并还原。
+
+---
+
+## 相关项目
+
+- **[HyperSwitch](https://github.com/trunkszi/hyperswitch)** —— 面向键盘的 macOS 应用 / 窗口切换器：按住快捷键浏览正在运行的应用或窗口（可带实时缩略图），松手即可切换。
+
+两者构建方式一致——同为菜单栏代理应用，使用相同的「辅助功能 / 屏幕录制」权限，同样提供英语与简体中文界面——且定位互补：HyperDock 用指针从 Dock 抵达窗口，HyperSwitch 用键盘抵达窗口。两者可同时运行，互不冲突。
 
 ---
 
