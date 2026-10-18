@@ -302,22 +302,26 @@ final class Preferences {
         set { write(newValue.rawValue, "resizeWindowsModifiers") }
     }
 
+    // The grid values are bounded on read as well as on write, to the same ranges the
+    // Window Management pane offers. A value already stored out of range — typed before
+    // the fields clamped, or written with `defaults` — otherwise reached the layout as is.
+
     /// Columns to tile into, or 0 to derive the grid from the screen's proportions.
     var tileGridColumns: Int {
-        get { observed { int("tileGridColumns", default: 0) } }
-        set { write(max(0, newValue), "tileGridColumns") }
+        get { observed { min(max(0, int("tileGridColumns", default: 0)), 12) } }
+        set { write(min(max(0, newValue), 12), "tileGridColumns") }
     }
 
     /// Rows to tile into, or 0 to derive them.
     var tileGridRows: Int {
-        get { observed { int("tileGridRows", default: 0) } }
-        set { write(max(0, newValue), "tileGridRows") }
+        get { observed { min(max(0, int("tileGridRows", default: 0)), 12) } }
+        set { write(min(max(0, newValue), 12), "tileGridRows") }
     }
 
     /// Points left between tiled windows.
     var tileGridGap: Int {
-        get { observed { int("tileGridGap", default: 0) } }
-        set { write(max(0, newValue), "tileGridGap") }
+        get { observed { min(max(0, int("tileGridGap", default: 0)), 80) } }
+        set { write(min(max(0, newValue), 80), "tileGridGap") }
     }
 
     // MARK: Advanced

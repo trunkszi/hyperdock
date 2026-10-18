@@ -14,7 +14,11 @@ enum DockEdge: Sendable {
 /// that the Liquid Glass material, the border and the shadow all follow one continuous
 /// path. `glassEffect(_:in:)` renders correctly along an arbitrary shape, and a shadow
 /// cast from two overlapping views would show a seam where they meet.
-struct BubbleShape: Shape {
+///
+/// `nonisolated` because `Shape` is: SwiftUI may call `path(in:)` off the main actor, and
+/// under MainActor default isolation the conformance would otherwise cross into
+/// main-actor code — which Xcode 27's compiler rejects outright.
+nonisolated struct BubbleShape: Shape {
     /// Where the pointer meets the body, in the shape's own coordinate space. Tracks
     /// the Dock icon, which moves as the Dock magnifies or slides in.
     var pointerPosition: CGFloat

@@ -83,6 +83,12 @@ struct WindowManagementPane: View {
             } header: { Text("Move and resize from anywhere") } footer: {
                 Text("Hold the keys and drag anywhere inside a window, not just its title bar. Resizing grows from the corner nearest where the drag began.")
             }
+            // Edge snapping rides on the move drag, so whether macOS's own tiling has to
+            // stand aside depends on these four as much as on the snap switch itself.
+            .onChange(of: preferences.moveWindowsEnabled) { _, _ in SystemTiling.apply() }
+            .onChange(of: preferences.moveWindowsModifiers) { _, _ in SystemTiling.apply() }
+            .onChange(of: preferences.resizeWindowsEnabled) { _, _ in SystemTiling.apply() }
+            .onChange(of: preferences.resizeWindowsModifiers) { _, _ in SystemTiling.apply() }
 
             Section {
                 Picker("Grid", selection: gridChoice) {

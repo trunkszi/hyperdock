@@ -53,18 +53,23 @@ final class FullSizePreviewController {
 
     /// Called whenever the hovered preview changes. Passing `nil` cancels.
     func hover(_ window: WindowInfo?, bubbleFrame: CGRect) {
-        pendingTask?.cancel()
-
         guard Preferences.shared.showFullSizePreviewOnHover, let window else {
             currentTarget = nil
             hide()
             return
         }
 
-        // Same window as the one already showing: nothing to do. Without this, a stream
-        // of hover events for the same tile would keep restarting the timer and, once
-        // shown, keep re-presenting — which reads as a flicker.
+        // Same window as the one already showing — or already counting down: nothing to
+        // do. Without this, a stream of hover events for the same tile would keep
+        // restarting the timer and, once shown, keep re-presenting — which reads as a
+        // flicker.
+        //
+        // The pending countdown is cancelled only *after* this check. Cancelling first
+        // meant that leaving a card and coming back to it before the bubble's focus
+        // settled killed the countdown and then returned here, so that card never showed
+        // its full-size preview again until the pointer visited another one.
         guard currentTarget != window.id else { return }
+        pendingTask?.cancel()
         currentTarget = window.id
 
         let delayMilliseconds = hasShownOnce

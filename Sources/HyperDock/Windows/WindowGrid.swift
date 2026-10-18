@@ -53,6 +53,21 @@ enum WindowGrid {
         let (columns, rows) = shape(for: count, in: area,
                                     fixedColumns: fixedColumns, fixedRows: fixedRows)
 
+        // The gap is whatever is left over once every cell keeps a usable minimum, never
+        // more. Applied as given, a gap wider than the cells it separates produced
+        // negative widths and heights — frames no window can take, which applications
+        // answer in their own unpredictable ways.
+        let minimumCell: CGFloat = 40
+        var gap = max(0, gap)
+        if columns > 1 {
+            gap = min(gap, max(0, (area.width - minimumCell * CGFloat(columns))
+                                  / CGFloat(columns - 1)))
+        }
+        if rows > 1 {
+            gap = min(gap, max(0, (area.height - minimumCell * CGFloat(rows))
+                                  / CGFloat(rows - 1)))
+        }
+
         let rowHeight = (area.height - gap * CGFloat(rows - 1)) / CGFloat(rows)
         var frames: [CGRect] = []
         frames.reserveCapacity(count)

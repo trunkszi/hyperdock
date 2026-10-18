@@ -74,26 +74,89 @@ final class BubbleModel {
         let columns: Int
     }
 
-    /// The thumbnail width the slider currently asks for.
+    /// The largest size the whole bubble may take, set by the panel from the visible
+    /// frame of the screen it is about to appear on. `nil` means unbounded.
     ///
-    /// The floor is deliberately generous: below roughly 140pt a window screenshot stops
-    /// being recognisable, which defeats the point of a visual switcher.
+    /// Without it the bubble's size followed only from the window count and the slider,
+    /// so an application with many windows — or a large slider on a small display — grew
+    /// a bubble taller or wider than the screen, and the on-screen clamp could only push
+    /// the overflow off the opposite edge. The bubble has no scrolling, so whatever fell
+    /// off was simply unreachable.
+    var sizeLimit: CGSize?
+
+    /// The thumbnail width the slider currently asks for, shrunk if needed so the whole
+    /// bubble fits inside `sizeLimit`.
+    ///
+    /// The slider's floor is deliberately generous: below roughly 140pt a window
+    /// screenshot stops being recognisable, which defeats the point of a visual switcher.
+    /// Fitting the screen still wins over that floor, because an unreachable preview is
+    /// worse than a small one.
     var thumbnailWidth: CGFloat {
         let slider = Preferences.shared.bubbleSize
-        return 140 + slider * 220   // 140…360 pt
+        let preferred = 140 + slider * 220   // 140…360 pt
+        guard let sizeLimit, !windows.isEmpty else { return preferred }
+        let columns = columnCount
+        return Self.fittedThumbnailWidth(
+            preferred: preferred,
+            columns: columns,
+            rows: max(1, Int(ceil(Double(windows.count) / Double(columns)))),
+            aspectRatio: representativeAspectRatio,
+            chrome: chromeSize(for: edge),
+            limit: sizeLimit)
     }
 
     /// Tile height for the current window set, driven by the mean aspect ratio so tiles
     /// in a row share a baseline instead of jittering.
     var thumbnailHeight: CGFloat {
+        (thumbnailWidth / representativeAspectRatio).rounded()
+    }
+
+    private var representativeAspectRatio: CGFloat {
         let ratios = windows.map(\.aspectRatio).filter { $0 > 0 }
         let representative = ratios.isEmpty
             ? 16.0 / 10.0
             : ratios.reduce(0, +) / CGFloat(ratios.count)
         // Clamped so a very tall or very wide window cannot stretch the whole row into
         // an unusable shape.
-        let clamped = min(max(representative, 0.8), 2.4)
-        return (thumbnailWidth / clamped).rounded()
+        return min(max(representative, 0.8), 2.4)
+    }
+
+    /// Everything in the bubble that is not thumbnail: padding, the header and the
+    /// pointer. Shared by `metrics(for:)` and the fit so the two cannot disagree.
+    private func chromeSize(for edge: DockEdge) -> CGSize {
+        var size = CGSize(width: Design.bubblePadding * 2, height: Design.bubblePadding * 2)
+        if Preferences.shared.showApplicationName {
+            size.height += Design.headerHeight + Design.titleGap
+        }
+        if Preferences.shared.drawTriangle {
+            switch edge {
+            case .bottom: size.height += Design.pointerLength
+            case .left, .right: size.width += Design.pointerLength
+            }
+        }
+        return size
+    }
+
+    /// The widest thumbnail, up to `preferred`, at which a grid of `columns` × `rows`
+    /// previews plus `chrome` still fits inside `limit`.
+    ///
+    /// Floored at 40 pt: a limit too small for even that is a degenerate screen, and a
+    /// zero or negative width would collapse the grid instead of merely overflowing.
+    static func fittedThumbnailWidth(preferred: CGFloat,
+                                     columns: Int,
+                                     rows: Int,
+                                     aspectRatio: CGFloat,
+                                     chrome: CGSize,
+                                     limit: CGSize) -> CGFloat {
+        let columns = CGFloat(max(1, columns))
+        let rows = CGFloat(max(1, rows))
+        let byWidth = (limit.width - chrome.width - (columns - 1) * Design.cardGap) / columns
+        let rowHeight = (limit.height - chrome.height - (rows - 1) * Design.cardGap) / rows
+        // Each row is a thumbnail plus its title line; the thumbnail's height is its width
+        // over the aspect ratio, so the height budget converts back into a width. The
+        // `rounded()` in `thumbnailHeight` can add half a point per row, hence the 1 pt.
+        let byHeight = (rowHeight - Design.titleGap - Design.titleHeight - 1) * aspectRatio
+        return max(40, min(preferred, byWidth, byHeight).rounded(.down))
     }
 
     /// Columns to lay the previews out in.
@@ -115,25 +178,18 @@ final class BubbleModel {
         let columns = columnCount
         let rows = max(1, Int(ceil(Double(windows.count) / Double(columns))))
 
+        let chrome = chromeSize(for: edge)
+
         let width = CGFloat(columns) * thumbnailWidth
             + CGFloat(columns - 1) * Design.cardGap
-            + Design.bubblePadding * 2
+            + chrome.width
 
-        var height = CGFloat(rows) * (thumbnailHeight + Design.titleGap + Design.titleHeight)
+        let height = CGFloat(rows) * (thumbnailHeight + Design.titleGap + Design.titleHeight)
             + CGFloat(rows - 1) * Design.cardGap
-            + Design.bubblePadding * 2
-        if Preferences.shared.showApplicationName {
-            height += Design.headerHeight + Design.titleGap
-        }
+            + chrome.height
 
-        var size = CGSize(width: width, height: height)
-        if Preferences.shared.drawTriangle {
-            switch edge {
-            case .bottom: size.height += Design.pointerLength
-            case .left, .right: size.width += Design.pointerLength
-            }
-        }
-        return Metrics(size: size, thumbnailWidth: thumbnailWidth, columns: columns)
+        return Metrics(size: CGSize(width: width, height: height),
+                       thumbnailWidth: thumbnailWidth, columns: columns)
     }
 
     // MARK: - Updates

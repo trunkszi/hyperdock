@@ -59,8 +59,29 @@ final class DockWatcher: BubbleKeyboardHandling {
     /// Closes a bubble the pointer has silently left. See `startPresenceWatchdog`.
     private var presenceTask: Task<Void, Never>?
 
+    /// Re-aims a newly opened bubble once the Dock has settled. See `startAnchorSettle`.
+    private var anchorSettleTask: Task<Void, Never>?
+
     /// Where the pointer was on the previous event, for hover-intent.
     private var previousPointer: CGPoint?
+
+    /// The screen the pointer was on at the previous event, so crossing displays is seen
+    /// as the single moment it is rather than as a state that lasts.
+    private var previousPointerScreen: NSScreen?
+
+    /// The Dock's thickness — the short side of its tiles' union — from the last
+    /// geometry refresh. Used to tell whether the pointer on another display is close
+    /// enough to that display's Dock edge to pull the Dock across.
+    private var dockThickness: CGFloat = 0
+
+    /// An application this process has just asked to come forward from a bubble that
+    /// stays open, and until when its activation is expected.
+    ///
+    /// With "hide when a preview is clicked" turned off, raising the clicked window
+    /// activates its application, and the activation observer — which closes the bubble
+    /// for any application coming forward — took the bubble down anyway. The setting
+    /// therefore only ever worked for windows of the application that was already in front.
+    private var expectedActivation: (pid: pid_t, deadline: Date)?
 
     init(panelController: PreviewPanelController, windowManager: WindowManager) {
         self.panelController = panelController
@@ -115,8 +136,11 @@ final class DockWatcher: BubbleKeyboardHandling {
         let activationObserver = workspaceCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.closeBubble() }
+        ) { [weak self] notification in
+            // Read here: `Notification` is not Sendable, a pid is.
+            let pid = (notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                        as? NSRunningApplication)?.processIdentifier
+            Task { @MainActor in self?.applicationActivated(pid: pid) }
         }
         observers.insert(activationObserver, center: workspaceCenter)
 
@@ -191,9 +215,22 @@ final class DockWatcher: BubbleKeyboardHandling {
         // computed for the previous screen is not merely stale, it is on the wrong
         // monitor — and the five-second timer would leave hovering dead there for up to
         // that long. Crossing to another screen refreshes immediately.
-        let crossedScreens = dockScreen != nil
-            && ScreenGeometry.screen(containing: mouse) !== dockScreen
-        if crossedScreens || Date().timeIntervalSince(lastStripRefresh) > 5 {
+        //
+        // Only the crossing itself, and the approach to that screen's Dock edge, count.
+        // This used to test "the pointer is on a screen other than the Dock's", which
+        // stays true the whole time the user works on the other display: every mouse
+        // event there re-read the entire Dock over Accessibility, at the 0.3 s throttle,
+        // indefinitely. The Dock can only move to this screen when the pointer is pushed
+        // against its Dock edge, so that is the one place worth watching continuously.
+        let pointerScreen = ScreenGeometry.screen(containing: mouse)
+        let crossedScreens = previousPointerScreen != nil && pointerScreen !== previousPointerScreen
+        previousPointerScreen = pointerScreen
+        let reachingForDock = dockScreen != nil && pointerScreen !== dockScreen
+            && pointerScreen.map {
+                Self.isNearDockEdge(mouse, of: $0.frame, edge: dockEdge,
+                                    thickness: dockThickness)
+            } == true
+        if crossedScreens || reachingForDock || Date().timeIntervalSince(lastStripRefresh) > 5 {
             // Still throttled, or a pointer sweeping along a screen boundary would queue
             // an Accessibility query on every event.
             if Date().timeIntervalSince(lastStripRefresh) > 0.3 {
@@ -227,7 +264,17 @@ final class DockWatcher: BubbleKeyboardHandling {
             self.isQuerying = false
             guard !Task.isCancelled, self.monitor != nil else { return }
             self.tileSnapshot = tiles
-            self.evaluate(tiles: tiles, mouse: mouse)
+            // Judged against where the pointer is *now*, not where it was when the query
+            // began. The query takes real time, and events that arrived meanwhile have
+            // already been handled with newer positions: a pointer that has since left
+            // the strip was already given its dismissal, and evaluating the old position
+            // afterwards re-armed an activation for an icon the user had left. A pointer
+            // that has reached the bubble, or left the strip, is the newer events' to
+            // decide; this answer is only still relevant inside the strip.
+            let current = NSEvent.mouseLocation
+            guard !self.panelController.contains(screenPoint: current),
+                  self.dockStrip.contains(current) else { return }
+            self.evaluate(tiles: tiles, mouse: current)
         }
     }
 
@@ -268,6 +315,16 @@ final class DockWatcher: BubbleKeyboardHandling {
 
         if hit.bundleURL == activeTile?.bundleURL {
             cancelDismissal()
+            // Back on the icon whose bubble is showing: a countdown started for another
+            // icon on the way here is no longer wanted. Left running, a quick A → B → A
+            // opened B's bubble while the pointer rested on A.
+            activationTask?.cancel()
+            activationTask = nil
+            pendingTile = nil
+            // The icon may have moved since its bubble opened — the Dock was still
+            // sliding in, or magnification has grown it — so keep the bubble aimed at it.
+            activeTile = hit
+            panelController.reanchor(to: hit.frame)
             return
         }
         scheduleActivation(for: hit)
@@ -373,12 +430,22 @@ final class DockWatcher: BubbleKeyboardHandling {
         activationTask?.cancel()
         pendingTile = tile.bundleURL
 
-        let delay = UInt64(max(0, Preferences.shared.activationDelay)) * 1_000_000
+        let delay = Self.activationDelay(milliseconds: Preferences.shared.activationDelay)
         activationTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: delay)
+            try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             await self?.openBubble(for: tile)
         }
+    }
+
+    /// The hover countdown for a stored activation delay, bounded to what the settings
+    /// field offers.
+    ///
+    /// The stored value is whatever was typed: the field's stepper is bounded but its text
+    /// is not, and `defaults write` bypasses both. Converted unbounded, a large value
+    /// overflowed the nanosecond multiplication — a trap, on the first hover, every launch.
+    nonisolated static func activationDelay(milliseconds: Int) -> Duration {
+        .milliseconds(min(max(0, milliseconds), 5000))
     }
 
     private func openBubble(
@@ -447,6 +514,29 @@ final class DockWatcher: BubbleKeyboardHandling {
         startThumbnailCapture(for: windows)
         startPeriodicRefresh(for: windows)
         startPresenceWatchdog()
+        startAnchorSettle(for: bundleURL)
+    }
+
+    /// Re-reads the icon's frame once the Dock has had time to finish moving.
+    ///
+    /// `evaluate` re-anchors on pointer movement, but the common case needs no movement at
+    /// all: the pointer pushes into an auto-hidden Dock and rests, the bubble opens from a
+    /// frame taken mid-slide, and the Dock finishes sliding under a still pointer that
+    /// produces no further events. One look after the reveal animation is enough.
+    private func startAnchorSettle(for bundleURL: URL) {
+        anchorSettleTask?.cancel()
+        anchorSettleTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            let tiles = await AXCore.shared.dockTiles()
+            guard !Task.isCancelled, let self,
+                  self.activeTile?.bundleURL == bundleURL,
+                  let tile = tiles.first(where: { $0.bundleURL == bundleURL })
+            else { return }
+            self.tileSnapshot = tiles
+            self.activeTile = tile
+            self.panelController.reanchor(to: tile.frame)
+        }
     }
 
     /// Handles a scroll landing on the preview bubble.
@@ -537,18 +627,28 @@ final class DockWatcher: BubbleKeyboardHandling {
         let activationTarget = CGS.activationTargetToReach(window: window.id, pid: window.pid)
         let destination = activationTarget?.space
 
-        cancelWork()
-
         // "Hide when a preview is clicked" turned off means the user wants to keep
         // scanning the same application's windows — so leave the bubble up. Reaching
         // another Space is the exception: the panel joins all Spaces, so it would be
         // captured into the transition and slide across with the desktop.
         guard Preferences.shared.hideWhenPreviewClicked || destination != nil else {
+            // Only what could open a *different* bubble is stopped. `cancelWork` also
+            // stops thumbnail capture and refresh and invalidates their generation, which
+            // left the bubble that is staying up with frozen or missing previews.
+            activationTask?.cancel()
+            activationTask = nil
+            pendingTile = nil
+            cancelDismissal()
+            // The raise activates the window's application, and that activation must not
+            // be read as the user moving on.
+            expectedActivation = (window.pid, Date().addingTimeInterval(1.5))
             Task { @MainActor [weak self] in
                 await self?.raise(window)
             }
             return
         }
+
+        cancelWork()
 
         // Tear the bubble down *before* touching Spaces, and wait for it to finish.
         //
@@ -864,9 +964,22 @@ final class DockWatcher: BubbleKeyboardHandling {
         _ = NSRunningApplication(processIdentifier: window.pid)?.activate()
     }
 
+    /// Closes the bubble because another application came forward — unless it is the one
+    /// a kept-open bubble has just raised a window of. See `expectedActivation`.
+    private func applicationActivated(pid: pid_t?) {
+        if let expected = expectedActivation, let pid,
+           expected.pid == pid, Date() < expected.deadline {
+            return
+        }
+        closeBubble()
+    }
+
     /// Cancels everything driving an open bubble without touching the panel itself.
     private func cancelWork() {
         bubbleGeneration &+= 1
+        expectedActivation = nil
+        anchorSettleTask?.cancel()
+        anchorSettleTask = nil
         activationTask?.cancel()
         activationTask = nil
         pendingTile = nil
@@ -1122,24 +1235,50 @@ final class DockWatcher: BubbleKeyboardHandling {
             ?? NSScreen.main
         guard let bounds = screen?.frame else { return }
         dockScreen = screen
+        dockThickness = dockEdge.isHorizontal ? strip.height : strip.width
+        dockStrip = Self.hoverStrip(forDock: strip, edge: dockEdge, screenFrame: bounds)
+    }
 
-        let depth = max(strip.height, strip.width)
-        switch dockEdge {
+    /// The gate rectangle for a Dock occupying `dock` (AppKit coordinates) along `edge`
+    /// of a screen whose frame is `screenFrame`.
+    ///
+    /// The depth across the Dock is always its *thickness*: the height of a bottom Dock,
+    /// the width of a side one. The left case once used the larger of the two sides —
+    /// for a vertical Dock that is the whole column of icons, several hundred points —
+    /// and started the strip that far outside the screen while keeping it only three
+    /// Dock-widths wide, so the entire gate lay off screen. No pointer could ever enter
+    /// it, and with the Dock on the left previews and Dock click shortcuts never worked.
+    nonisolated static func hoverStrip(forDock dock: CGRect, edge: DockEdge,
+                                       screenFrame bounds: CGRect) -> CGRect {
+        switch edge {
         case .bottom:
-            dockStrip = CGRect(x: strip.minX - 40,
-                               y: bounds.minY - strip.height,
-                               width: strip.width + 80,
-                               height: strip.height * 3)
+            return CGRect(x: dock.minX - 40,
+                          y: bounds.minY - dock.height,
+                          width: dock.width + 80,
+                          height: dock.height * 3)
         case .left:
-            dockStrip = CGRect(x: bounds.minX - depth,
-                               y: strip.minY - 40,
-                               width: strip.width * 3,
-                               height: strip.height + 80)
+            return CGRect(x: bounds.minX - dock.width,
+                          y: dock.minY - 40,
+                          width: dock.width * 3,
+                          height: dock.height + 80)
         case .right:
-            dockStrip = CGRect(x: bounds.maxX - strip.width * 2,
-                               y: strip.minY - 40,
-                               width: strip.width * 3,
-                               height: strip.height + 80)
+            return CGRect(x: bounds.maxX - dock.width * 2,
+                          y: dock.minY - 40,
+                          width: dock.width * 3,
+                          height: dock.height + 80)
+        }
+    }
+
+    /// Whether a pointer on some screen is close enough to that screen's Dock edge to be
+    /// pushing the Dock over to it. Two thicknesses deep, the same reach the hover strip
+    /// has inside the screen; a Dock never measured yet is assumed 120 pt thick.
+    nonisolated static func isNearDockEdge(_ point: CGPoint, of screenFrame: CGRect,
+                                           edge: DockEdge, thickness: CGFloat) -> Bool {
+        let reach = (thickness > 0 ? thickness : 120) * 2
+        switch edge {
+        case .bottom: return point.y <= screenFrame.minY + reach
+        case .left: return point.x <= screenFrame.minX + reach
+        case .right: return point.x >= screenFrame.maxX - reach
         }
     }
 

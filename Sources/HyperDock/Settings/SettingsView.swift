@@ -122,6 +122,16 @@ struct NumberField: View {
 
     @ScaledMetric(relativeTo: .body) private var digitWidth: CGFloat = 11
 
+    /// The field's binding, held to `range`.
+    ///
+    /// The stepper respects its range; typed text did not, so any number at all reached
+    /// the setting — a 1000 pt grid gap that laid windows out at negative sizes, or an
+    /// activation delay large enough to overflow on conversion.
+    private var clamped: Binding<Int> {
+        Binding(get: { value },
+                set: { value = min(max($0, range.lowerBound), range.upperBound) })
+    }
+
     var body: some View {
         // Field and stepper stay separate views. Putting the TextField inside
         // `Stepper(value:in:) { }` looks tidier but macOS treats that closure as a plain
@@ -132,7 +142,7 @@ struct NumberField: View {
         // has its field, stepper and unit at the same x regardless of how many digits or
         // how long the unit is.
         HStack(spacing: 4) {
-            TextField("", value: $value, format: .number)
+            TextField("", value: clamped, format: .number)
                 .textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(.trailing)
                 .frame(width: CGFloat(digits) * digitWidth + 16)

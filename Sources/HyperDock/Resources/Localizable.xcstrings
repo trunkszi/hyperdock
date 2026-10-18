@@ -2281,6 +2281,26 @@
           }
         }
       }
+    },
+    "macOS will not start HyperDock at login until you allow it in Login Items.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在「登录项」中允许 HyperDock 之前，macOS 不会在登录时启动它。"
+          }
+        }
+      }
+    },
+    "Open Login Items Settings…": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开「登录项」设置…"
+          }
+        }
+      }
     }
   }
 }

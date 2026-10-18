@@ -346,6 +346,22 @@ final class PreviewPanelController {
         }
     }
 
+    /// Moves an open bubble to follow its Dock icon, without touching its contents.
+    ///
+    /// The icon's frame is captured at the moment it is hit, and that moment is often
+    /// mid-motion: an auto-hidden Dock is still sliding in, or magnification is still
+    /// growing the icon under the pointer. A bubble laid out from that frame stays aimed
+    /// at where the icon *was*. Sub-point changes are ignored so a resting pointer does
+    /// not make the bubble shimmer.
+    func reanchor(to tileFrame: CGRect) {
+        guard panel.isVisible, let last = lastTileFrame else { return }
+        guard abs(last.midX - tileFrame.midX) >= 1 || abs(last.midY - tileFrame.midY) >= 1
+                || abs(last.width - tileFrame.width) >= 1 || abs(last.height - tileFrame.height) >= 1
+        else { return }
+        lastTileFrame = tileFrame
+        layout(around: tileFrame, edge: model.edge, animated: true)
+    }
+
     /// True when the pointer is inside the bubble, so it should stay open.
     func contains(screenPoint: CGPoint) -> Bool {
         panel.isVisible && panel.frame.insetBy(dx: -4, dy: -4).contains(screenPoint)
@@ -354,8 +370,15 @@ final class PreviewPanelController {
     // MARK: - Placement
 
     private func layout(around tileFrame: CGRect, edge: DockEdge, animated: Bool) {
-        let metrics = model.metrics(for: edge)
         let tile = ScreenGeometry.appKitRect(fromAccessibility: tileFrame)
+        let screen = ScreenGeometry.screen(containing: CGPoint(x: tile.midX, y: tile.midY))
+        // Sized to the screen *before* the metrics are read, so a bubble that would not
+        // fit shrinks its previews instead of hanging off an edge. The 6 pt margin on each
+        // side matches the on-screen clamp below.
+        model.sizeLimit = screen.map {
+            CGSize(width: $0.visibleFrame.width - 12, height: $0.visibleFrame.height - 12)
+        }
+        let metrics = model.metrics(for: edge)
         let gap = CGFloat(Preferences.shared.distanceFromDock)
 
         var origin = CGPoint.zero
@@ -373,7 +396,7 @@ final class PreviewPanelController {
 
         // Keep the bubble on screen; the pointer then slides to stay aimed at the icon
         // rather than the whole bubble hanging off the edge.
-        if let screen = ScreenGeometry.screen(containing: CGPoint(x: tile.midX, y: tile.midY)) {
+        if let screen {
             let visible = screen.visibleFrame
             origin.x = min(max(origin.x, visible.minX + 6),
                            visible.maxX - metrics.size.width - 6)
