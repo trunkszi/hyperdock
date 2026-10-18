@@ -8,7 +8,7 @@ HyperDock is a menu-bar (agent) app for macOS: no Dock tile of its own, runs in 
 
 | | |
 |---|---|
-| **Version** | 1.0.0 |
+| **Version** | 1.0.1 |
 | **Platform** | macOS 26.0+, Apple Silicon (`arm64`) |
 | **Bundle ID** | `com.hyperdock.HyperDock` |
 | **Languages** | English, Simplified Chinese |
