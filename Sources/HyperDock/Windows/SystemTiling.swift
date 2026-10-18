@@ -28,9 +28,15 @@ enum SystemTiling {
     /// Matches the system tiling to HyperDock's own setting: while HyperDock snaps on a
     /// drag, macOS should not.
     static func apply() {
+        let preferences = Preferences.shared
         let shouldDisable = shouldDisable(
-            hyperDockDisabled: Preferences.shared.disabled,
-            snapEnabled: Preferences.shared.snapOnDragToEdge,
+            hyperDockDisabled: preferences.disabled,
+            snapEnabled: preferences.snapOnDragToEdge
+                && WindowManager.isMoveDragReachable(
+                    moveEnabled: preferences.moveWindowsEnabled,
+                    moveModifiers: preferences.moveWindowsModifiers,
+                    resizeEnabled: preferences.resizeWindowsEnabled,
+                    resizeModifiers: preferences.resizeWindowsModifiers),
             managerAvailable: managerAvailable
         )
         if shouldDisable {
@@ -48,6 +54,11 @@ enum SystemTiling {
 
     /// HyperDock owns the edge-drag gesture only while both the app and its snap feature
     /// are enabled. This pure policy is kept separate from the external defaults write.
+    ///
+    /// `snapEnabled` means *usable*, not merely switched on: HyperDock's snapping rides on
+    /// the move drag, so with that drag switched off, left with no keys, or shadowed by an
+    /// identical resize combination, nothing of HyperDock's can snap. Taking macOS's
+    /// tiling away then left the user with neither.
     static func shouldDisable(hyperDockDisabled: Bool,
                               snapEnabled: Bool,
                               managerAvailable: Bool) -> Bool {

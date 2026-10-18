@@ -56,6 +56,12 @@ final class WindowManager {
         /// Waiting for the asynchronous hit test that identifies the grabbed window.
         case resolving(origin: CGPoint, mode: Mode)
         case active(window: AXCore.HitWindow, origin: CGPoint, startFrame: CGRect, mode: Mode)
+        /// The mouse-down was swallowed but there turned out to be no window to drag.
+        ///
+        /// The rest of the press still has to be swallowed. The application underneath
+        /// never saw the down, and handing it the drags and the up on their own gives it
+        /// a release with no press — which some applications read as a click.
+        case consumed
     }
 
     private enum Mode { case move, resize }
@@ -63,6 +69,12 @@ final class WindowManager {
     private var gesture: Gesture = .none {
         didSet { restartWatchdog() }
     }
+
+    /// Identifies one press, so a hit test that outlives its gesture cannot act on the
+    /// next one. Without it, a press released before its hit test returned and followed by
+    /// a second press had the *first* window attached to the second drag — and a failed
+    /// first lookup ended the second gesture outright.
+    private var gestureSerial: UInt = 0
     private var currentZone: SnapZone?
     private var zoneEnteredAt: Date?
 
@@ -82,6 +94,9 @@ final class WindowManager {
     /// intermediate positions are worthless anyway.
     private var pendingFrame: CGRect?
     private var pendingTarget: (id: CGWindowID, pid: pid_t)?
+    /// For a resize grabbed from the left or top, the edges that must not move. See
+    /// `ResizeAnchor`.
+    private var pendingAnchor: ResizeAnchor?
     private var frameWriter: Task<Void, Never>?
 
     /// Set while a preview bubble is open. Keys are only consumed while this is non-nil
@@ -197,6 +212,14 @@ final class WindowManager {
             return false
         }
 
+        // The settings shortcut comes before the off switch. Advanced ▸ "Turn HyperDock
+        // off" promises that this shortcut always works, and with the menu-bar icon
+        // hidden it is the only way back to the switch that turns HyperDock on again.
+        if type == .keyDown, Self.isSettingsHotKey(keyCode: keyCode, flags: flags) {
+            openSettings()
+            return true
+        }
+
         let preferences = Preferences.shared
         guard !preferences.disabled else { return false }
 
@@ -226,17 +249,19 @@ final class WindowManager {
             guard let mode = dragMode(for: flags, preferences: preferences) else { return false }
             // Only the location is recorded here; identifying the window under it needs
             // Accessibility, which must not run on this thread.
+            gestureSerial &+= 1
             gesture = .resolving(origin: location, mode: mode)
-            resolveWindow(at: location, mode: mode)
+            resolveWindow(at: location, mode: mode, serial: gestureSerial)
             return true
 
         case .leftMouseDragged:
             switch gesture {
             case .none:
                 return false
-            case .resolving:
+            case .resolving, .consumed:
                 // Swallow while the hit test is in flight, so the application underneath
-                // does not begin its own drag beneath ours.
+                // does not begin its own drag beneath ours — and after a hit test that
+                // found nothing, because the press it would belong to was never delivered.
                 return true
             case .active(let window, let origin, let startFrame, let mode):
                 applyDrag(window: window, origin: origin, startFrame: startFrame,
@@ -267,6 +292,18 @@ final class WindowManager {
 
     // MARK: - Gesture handling
 
+    /// Whether some press can start a move drag at all — the gesture edge snapping rides on.
+    ///
+    /// Mirrors `dragMode(for:preferences:)`: resize is matched first, so a move combination
+    /// equal to an enabled resize combination can never be reached.
+    static func isMoveDragReachable(moveEnabled: Bool,
+                                    moveModifiers: ModifierCombo,
+                                    resizeEnabled: Bool,
+                                    resizeModifiers: ModifierCombo) -> Bool {
+        guard moveEnabled, !moveModifiers.isEmpty else { return false }
+        return !(resizeEnabled && resizeModifiers == moveModifiers)
+    }
+
     private func dragMode(for flags: CGEventFlags, preferences: Preferences) -> Mode? {
         let pressed = ModifierCombo(eventFlags: flags)
         // Resize is checked first: its combination is usually a superset of move's, so
@@ -282,16 +319,18 @@ final class WindowManager {
         return nil
     }
 
-    private func resolveWindow(at origin: CGPoint, mode: Mode) {
+    private func resolveWindow(at origin: CGPoint, mode: Mode, serial: UInt) {
         Task { [weak self] in
-            guard let hit = await AXCore.shared.window(at: origin) else {
-                await MainActor.run { self?.endGesture() }
-                return
-            }
+            let hit = await AXCore.shared.window(at: origin)
             await MainActor.run {
                 guard let self else { return }
-                // A mouse-up may have already landed while the hit test was running.
-                guard case .resolving = self.gesture else { return }
+                // A mouse-up may have already landed while the hit test was running, and
+                // another press may have begun since; either way this answer is stale.
+                guard serial == self.gestureSerial, case .resolving = self.gesture else { return }
+                guard let hit else {
+                    self.gesture = .consumed
+                    return
+                }
                 self.gesture = .active(window: hit, origin: origin,
                                        startFrame: hit.frame, mode: mode)
             }
@@ -307,57 +346,120 @@ final class WindowManager {
         let dy = current.y - origin.y
 
         var target = startFrame
+        var anchor: ResizeAnchor?
         switch mode {
         case .move:
             target.origin.x += dx
             target.origin.y += dy
 
         case .resize:
-            // Resize from the quadrant the user grabbed, so the opposite corner stays
-            // put. Growing only from the top-left — as a naive implementation does —
-            // means every drag behaves as if the bottom-right corner were grabbed, which
-            // fights the user whenever they started anywhere else.
-            let grabbedRight = origin.x > startFrame.midX
-            let grabbedBottom = origin.y > startFrame.midY
-
-            if grabbedRight {
-                target.size.width = max(120, startFrame.width + dx)
-            } else {
-                let width = max(120, startFrame.width - dx)
-                target.origin.x = startFrame.maxX - width
-                target.size.width = width
-            }
-            // Accessibility y grows downward, so "bottom" is the larger y.
-            if grabbedBottom {
-                target.size.height = max(80, startFrame.height + dy)
-            } else {
-                let height = max(80, startFrame.height - dy)
-                target.origin.y = startFrame.maxY - height
-                target.size.height = height
-            }
+            (target, anchor) = Self.resizedFrame(
+                from: startFrame, grabbedAt: origin, dx: dx, dy: dy,
+                minimum: CGSize(width: 120, height: 80))
         }
 
-        enqueueFrame(target, for: window)
+        enqueueFrame(target, anchor: anchor, for: window)
 
         guard mode == .move, Preferences.shared.snapOnDragToEdge else { return }
         updateSnapPreview(pointer: current)
     }
 
+    /// The edges a resize grabbed from the left or the top must keep where they are.
+    ///
+    /// Growing from the left is written as "move the origin, change the width", and that
+    /// is only right if the application accepts the width. One with a minimum size answers
+    /// a narrower request with its minimum while keeping the new origin, so the right edge
+    /// — which the user never touched — slid right by the difference, and kept sliding on
+    /// every drag event past the minimum.
+    nonisolated struct ResizeAnchor: Equatable {
+        /// The right edge to hold, when the left edge is the one being dragged.
+        var maxX: CGFloat?
+        /// The bottom edge to hold (Accessibility y grows downward), when the top is.
+        var maxY: CGFloat?
+    }
+
+    /// The frame a resize drag asks for, and which edges it must hold.
+    ///
+    /// Resize from the quadrant the user grabbed, so the opposite corner stays put.
+    /// Growing only from the top-left — as a naive implementation does — means every drag
+    /// behaves as if the bottom-right corner were grabbed, which fights the user whenever
+    /// they started anywhere else.
+    nonisolated static func resizedFrame(from startFrame: CGRect,
+                                         grabbedAt origin: CGPoint,
+                                         dx: CGFloat, dy: CGFloat,
+                                         minimum: CGSize) -> (CGRect, ResizeAnchor?) {
+        var target = startFrame
+        var anchor = ResizeAnchor()
+        let grabbedRight = origin.x > startFrame.midX
+        let grabbedBottom = origin.y > startFrame.midY
+
+        if grabbedRight {
+            target.size.width = max(minimum.width, startFrame.width + dx)
+        } else {
+            let width = max(minimum.width, startFrame.width - dx)
+            target.origin.x = startFrame.maxX - width
+            target.size.width = width
+            anchor.maxX = startFrame.maxX
+        }
+        // Accessibility y grows downward, so "bottom" is the larger y.
+        if grabbedBottom {
+            target.size.height = max(minimum.height, startFrame.height + dy)
+        } else {
+            let height = max(minimum.height, startFrame.height - dy)
+            target.origin.y = startFrame.maxY - height
+            target.size.height = height
+            anchor.maxY = startFrame.maxY
+        }
+        return (target, anchor == ResizeAnchor() ? nil : anchor)
+    }
+
+    /// Where a window has to go so the held edges stay put at the size it actually took.
+    nonisolated static func reanchored(_ applied: CGRect, to anchor: ResizeAnchor) -> CGRect {
+        var frame = applied
+        if let maxX = anchor.maxX { frame.origin.x = maxX - applied.width }
+        if let maxY = anchor.maxY { frame.origin.y = maxY - applied.height }
+        return frame
+    }
+
     /// Coalesces frame writes so only the latest target is ever applied.
-    private func enqueueFrame(_ frame: CGRect, for window: AXCore.HitWindow) {
+    private func enqueueFrame(_ frame: CGRect, anchor: ResizeAnchor? = nil,
+                              for window: AXCore.HitWindow) {
         pendingFrame = frame
+        pendingAnchor = anchor
         pendingTarget = (window.id, window.pid)
         guard frameWriter == nil else { return }
 
         frameWriter = Task { [weak self] in
             while true {
-                guard let self else { return }
+                // A writer cancelled by `endGesture` must stop here, and must not touch
+                // `frameWriter` on the way out: by the time its last write returns, the
+                // next gesture may have started a writer of its own, and clearing the
+                // reference to it let a third writer start alongside — two loops applying
+                // frames concurrently, landing out of order.
+                guard !Task.isCancelled, let self else { return }
                 guard let frame = self.pendingFrame, let target = self.pendingTarget else {
                     self.frameWriter = nil
                     return
                 }
+                let anchor = self.pendingAnchor
                 self.pendingFrame = nil
-                await AXCore.shared.setFrame(frame, window: target.id, pid: target.pid)
+                self.pendingAnchor = nil
+                let applied = await AXCore.shared.setFrame(frame, window: target.id,
+                                                           pid: target.pid)
+                guard !Task.isCancelled else { return }
+                // The application chose a different size — a minimum, or a terminal
+                // rounding to whole character cells — so put the held edges back where the
+                // user left them. Not remembered as a floor: a size rounded up to a cell is
+                // no lower bound, and treating it as one stopped such a window shrinking.
+                // A newer drag event supersedes the correction, since it is written next.
+                guard let anchor, let applied, self.pendingFrame == nil,
+                      abs(applied.width - frame.width) > 0.5
+                        || abs(applied.height - frame.height) > 0.5
+                else { continue }
+                let corrected = Self.reanchored(applied, to: anchor)
+                if corrected.origin != applied.origin {
+                    await AXCore.shared.setFrame(corrected, window: target.id, pid: target.pid)
+                }
             }
         }
     }
@@ -452,6 +554,7 @@ final class WindowManager {
         gesture = .none
         pendingFrame = nil
         pendingTarget = nil
+        pendingAnchor = nil
         frameWriter?.cancel()
         frameWriter = nil
         watchdog?.cancel()
@@ -459,16 +562,28 @@ final class WindowManager {
         clearZone()
     }
 
+    /// Arms the stuck-gesture timer.
+    ///
+    /// It asks the hardware before giving up on a gesture. A plain ten-second timeout also
+    /// fired on a drag that was simply long — a window being nudged into place, or held
+    /// still while the user decided — and cut it off mid-air: the window stopped following
+    /// the pointer, and the rest of the press, whose down had been swallowed, went to the
+    /// application underneath as drags and a release it never saw begin. A button that is
+    /// still physically down means the release has not been lost, so the gesture is fine.
     private func restartWatchdog() {
         watchdog?.cancel()
         guard !isIdle else { watchdog = nil; return }
         watchdog = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(10))
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
+            while true {
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled else { return }
                 guard let self, !self.isIdle else { return }
+                if CGEventSource.buttonState(.combinedSessionState, button: .left) {
+                    continue
+                }
                 Log.windows.error("gesture watchdog fired; releasing a stuck drag")
                 self.endGesture()
+                return
             }
         }
     }
@@ -482,16 +597,9 @@ final class WindowManager {
 
     /// Returns true when the key was consumed.
     private func handleKey(flags: CGEventFlags, keyCode: Int64) -> Bool {
-        if Self.isSettingsHotKey(keyCode: keyCode, flags: flags) {
-            // Off the delivery path: building the settings window the first time means
-            // instantiating a SwiftUI hierarchy, and the tap has a one-second budget for
-            // the whole callback.
-            Task { @MainActor in
-                SettingsWindowController.shared.show(selecting: .general)
-            }
-            return true
-        }
-
+        // The settings shortcut has already been handled by `handle`, ahead of the
+        // disabled check.
+        //
         // Bubble navigation first, and only while a bubble is genuinely open. The target
         // is a weak reference, so a torn-down bubble releases these keys automatically.
         if let target = keyboardTarget, target.isAcceptingKeys,
@@ -526,6 +634,15 @@ final class WindowManager {
         return true
     }
 
+    private func openSettings() {
+        // Off the delivery path: building the settings window the first time means
+        // instantiating a SwiftUI hierarchy, and the tap has a one-second budget for the
+        // whole callback.
+        Task { @MainActor in
+            SettingsWindowController.shared.show(selecting: .general)
+        }
+    }
+
     /// The one shortcut that works with no bubble open and HyperDock in the background.
     private static func isSettingsHotKey(keyCode: Int64, flags: CGEventFlags) -> Bool {
         let preferences = Preferences.shared
@@ -535,7 +652,7 @@ final class WindowManager {
         return ModifierCombo(eventFlags: flags) == preferences.settingsHotKeyModifiers
     }
 
-    private static func bubbleKey(keyCode: Int64, flags: CGEventFlags) -> BubbleKey? {
+    static func bubbleKey(keyCode: Int64, flags: CGEventFlags) -> BubbleKey? {
         let combo = ModifierCombo(eventFlags: flags)
         switch keyCode {
         case 123 where combo.isEmpty: return .left
@@ -546,7 +663,9 @@ final class WindowManager {
         // the condition binds only to the last one, so a *modified* Return was taken as
         // a confirm and swallowed while the bubble was open.
         case 36 where combo.isEmpty, 76 where combo.isEmpty: return .confirm
-        case 53: return .dismiss                            // Escape
+        // Unmodified only, like the rest: ⌘⌥Esc is Force Quit, and swallowing it while a
+        // bubble was open took away the way out of a hung application.
+        case 53 where combo.isEmpty: return .dismiss       // Escape
         case 13 where combo == [.command]: return .closeWindow  // Cmd-W
         default: return nil
         }
@@ -577,6 +696,12 @@ final class WindowManager {
         // The first event starts an AX hit test. A trackpad can deliver several more
         // before it finishes; they must not each launch a second snap operation.
         guard scrollResolutionTask == nil else { return scrollingOverTitleBar }
+
+        // A new gesture starts with no answer yet. The flag still held the previous
+        // gesture's — true after any title-bar scroll — so the first event of the next
+        // scroll anywhere, a document included, was swallowed on the strength of a title
+        // bar the pointer had long since left.
+        scrollingOverTitleBar = false
 
         // Resolving the window needs Accessibility, which must not run here. Kick it to
         // a task and let this event through; the *next* event in the gesture is caught by

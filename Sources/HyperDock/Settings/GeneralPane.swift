@@ -20,7 +20,17 @@ struct GeneralPane: View {
                     Text("Run HyperDock in the background")
                 }
             } header: { EmptyView() } footer: {
-                Text("HyperDock keeps running in the background and starts automatically when you log in.")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("HyperDock keeps running in the background and starts automatically when you log in.")
+                    // Read after `launchAtLogin` so it redraws with it. Without this the
+                    // switch shows on while macOS is in fact not going to start HyperDock.
+                    if preferences.launchAtLogin && LoginItem.needsApproval {
+                        Text("macOS will not start HyperDock at login until you allow it in Login Items.")
+                        Button("Open Login Items Settings…") {
+                            LoginItem.openLoginItemsSettings()
+                        }
+                    }
+                }
             }
 
             Section {
