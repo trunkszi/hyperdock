@@ -15,6 +15,19 @@ HyperDock is a menu-bar (agent) app for macOS: no Dock tile of its own, runs in 
 
 ---
 
+## Screenshots
+
+Every Settings pane is available in English and Simplified Chinese. Switch in **Settings → About → Language**; the change applies immediately, without a restart.
+
+| | English | 简体中文 |
+|---|---|---|
+| **General** | ![General](images/settings-general-en.png) | ![通用](images/settings-general-zh.png) |
+| **Dock Items** — modifier + click shortcuts | ![Dock Items](images/settings-dock-items-en.png) | ![程序坞项目](images/settings-dock-items-zh.png) |
+| **Window Management** — edge snap, keyboard snap, move / resize | ![Window Management](images/settings-window-management-en.png) | ![窗口管理](images/settings-window-management-zh.png) |
+| **Appearance** | ![Appearance](images/settings-appearance-en.png) | ![外观](images/settings-appearance-zh.png) |
+
+---
+
 ## Features
 
 ### Window previews
@@ -190,6 +203,14 @@ defaults delete com.hyperdock.HyperDock 2>/dev/null || true
 ```
 
 If you used “Reveal a hidden Dock instantly”, turn that option off before quitting so Dock defaults can be restored, or reset settings from **General → Reset All Settings…**.
+
+---
+
+## Related projects
+
+- **[HyperSwitch](https://github.com/trunkszi/hyperswitch)** — a keyboard-first app and window switcher for macOS: hold a hotkey to browse running apps or windows with live thumbnails, then release to switch.
+
+The two are built the same way — menu-bar agent apps, the same Accessibility / Screen Recording permissions, the same English and Simplified Chinese interface — and they complement each other: HyperDock reaches your windows through the Dock with the pointer, HyperSwitch through the keyboard. Running both is fine; they do not conflict.
 
 ---
 
