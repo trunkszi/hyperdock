@@ -8,7 +8,7 @@ HyperDock 是 macOS 菜单栏代理（agent）应用：自身不出现在 Dock �
 
 | | |
 |---|---|
-| **版本** | 1.0.0 |
+| **版本** | 1.0.1 |
 | **平台** | macOS 26.0+，Apple Silicon（`arm64`） |
 | **Bundle ID** | `com.hyperdock.HyperDock` |
 | **界面语言** | 英语、简体中文 |
